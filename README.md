@@ -18,28 +18,46 @@ uvicorn backend.app:app --reload --port 8420
 Open http://127.0.0.1:8420 — the backend serves the frontend directly, no separate
 build step.
 
-### Option B: Docker Compose (separate frontend/backend containers)
+### Option B: Docker Compose (single container)
 
 ```bash
 docker compose up --build
 ```
 
-Open http://127.0.0.1:8420. This runs two containers:
-- `backend` — FastAPI + GPT-2, API only, on an internal port (also published on 8000
-  for direct API testing).
-- `frontend` — nginx serving the static dashboard and reverse-proxying `/api/*` to
-  `backend`, so the browser only ever talks to one origin.
+Open http://127.0.0.1:3000. This runs a single container via multi-stage Dockerfile:
+- Multi-stage build compiles the React/Vite/Tailwind frontend and bundles it into the backend image.
+- FastAPI serves both the GPT-2 analysis API (`/api/*`) and the static frontend dashboard on port 3000 (mapped to container port 8000).
 
 Model weights are cached in a named Docker volume (`hf-cache`), so restarting the
-containers doesn't re-download them. To use a different model, set `NEUROSCOPE_MODEL`
+container doesn't re-download them. To use a different model, set `NEUROSCOPE_MODEL`
 in your shell before `docker compose up` (see below).
 
-The first run downloads GPT-2's weights (~500MB) from Hugging Face. On startup the
-backend spends ~15s running the concept probes before it starts serving.
+The first run downloads GPT-2's weights (~500MB) from Hugging Face, then spends
+~15s running the concept probes. Those probe results are cached to disk inside
+the `hf-cache` volume, so a restart skips straight to loading the arrays
+(~0.5s) instead of re-probing. Force a fresh probe with `make rebuild-cache`
+(or `NEUROSCOPE_REBUILD_CACHE=1`), and note that editing
+`backend/neuroscope/concepts.py` invalidates the cache automatically.
+
+## Tests
+
+```bash
+make test
+```
+
+Runs the suite in a bare `python:3.12-slim` container with numpy + pytest only —
+no torch, no model weights. That is deliberate: it means the pure logic in
+`neuroscope/circuits.py` and `neuroscope/probing.py` stays importable and
+testable without any model, and a passing run proves nothing has grown a hidden
+torch dependency.
+
+Dependency versions in `requirements.txt` are pinned to a tested set. To bump
+one, change a single pin, `docker compose up --build`, run `make test`, then
+re-run an analysis and check the numbers are still sane.
 
 ## How it works
 
-**Backend** (`backend/app.py`, `backend/concepts.py`) — GPT-2 small via Hugging Face
+**Backend** (`backend/app.py`, `backend/neuroscope/`) — GPT-2 small via Hugging Face
 Transformers, dissected with PyTorch hooks:
 
 - **Attention heads**: a forward pre-hook on each layer's `attn.c_proj` splits the
@@ -56,7 +74,7 @@ Transformers, dissected with PyTorch hooks:
   text (≥ 1.6σ = detected). That is how "king" → Royalty → *Layer 2 · Head 7* comes
   from real measurements, not a lookup table.
 
-**Frontend** (`frontend/`) — vanilla JS, three panels:
+**Frontend** (`frontend/`) — React + Vite + Tailwind CSS + shadcn + TypeScript, three panels:
 
 1. **Input** — type (live mode re-analyzes as you type) or pick an example; the
    **Concept Circuit Finder** lights up a concept's heads + neurons across the
